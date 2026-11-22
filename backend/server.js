@@ -4,6 +4,7 @@ import cors from "cors";
 import multer from "multer";
 import OpenAI from "openai";
 import fs from "node:fs/promises";
+import { createReadStream } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -13,15 +14,15 @@ app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 const upload = multer({
   dest: os.tmpdir(),
-  limits: { fileSize: 200 * 1024 * 1024 },
+  limits: { fileSize: 25 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
-    const allowed = new Set(["audio/mpeg", "audio/mp3", "audio/mp4", "audio/wav", "audio/x-wav", "audio/webm", "audio/ogg", "video/mp4"]);
-    cb(allowed.has(file.mimetype) ? null : new Error("Unsupported media type"), allowed.has(file.mimetype));
+    const allowed = new Set(["audio/mpeg", "audio/mp3", "audio/mp4", "audio/wav", "audio/x-wav", "audio/webm", "audio/ogg"]);
+    cb(allowed.has(file.mimetype) ? null : new Error("Upload an audio file (MP3, M4A, WAV, WebM or OGG)"), allowed.has(file.mimetype));
   }
 });
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const required = ["OPENAI_API_KEY", "ELEVENLABS_API_KEY", "APP_API_TOKEN"];
+const required = ["OPENAI_API_KEY", "ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID", "APP_API_TOKEN"];
 function authorize(req, res, next) {
   const token = req.get("x-app-token");
   if (!token || token !== process.env.APP_API_TOKEN) return res.status(401).json({ error: "Unauthorized" });
@@ -35,11 +36,11 @@ app.post("/dub", authorize, upload.single("media"), async (req, res) => {
   const tempOutput = path.join(os.tmpdir(), crypto.randomUUID() + ".mp3");
   try {
     const transcription = await openai.audio.transcriptions.create({
-      file: await fs.open(req.file.path).then(h => h.createReadStream()),
-      model: "whisper-1",
-      response_format: "text"
+      file: createReadStream(req.file.path),
+      model: "gpt-transcribe",
+      response_format: "json"
     });
-    const sourceText = String(transcription || "").trim();
+    const sourceText = String(transcription.text || "").trim();
     if (!sourceText) return res.status(422).json({ error: "No speech was detected" });
 
     const translated = await openai.chat.completions.create({
@@ -53,9 +54,7 @@ app.post("/dub", authorize, upload.single("media"), async (req, res) => {
     const hindiText = translated.choices[0]?.message?.content?.trim();
     if (!hindiText) throw new Error("Hindi translation was empty");
 
-    const voiceId = process.env.ELEVENLABS_VOICE_ID;
-    if (!voiceId) throw new Error("Set ELEVENLABS_VOICE_ID in backend environment");
-    const speech = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}`, {
+    const speech = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(process.env.ELEVENLABS_VOICE_ID)}`, {
       method: "POST",
       headers: { "xi-api-key": process.env.ELEVENLABS_API_KEY, "Content-Type": "application/json", Accept: "audio/mpeg" },
       body: JSON.stringify({ text: hindiText, model_id: "eleven_multilingual_v2", voice_settings: { stability: 0.5, similarity_boost: 0.75 } })
